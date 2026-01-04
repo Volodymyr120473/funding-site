@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    /* Runtime */
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+
+    /* Paths */
+    "rootDir": "./src",
+    "outDir": "./dist",
+
+    /* Type checking */
+    "strict": true,
+    "skipLibCheck": true,
+
+    /* Node types */
+    "types": ["node"],
+
+    /* Source maps */
+    "sourceMap": true,
+
+    /* Quality of life */
+    "forceConsistentCasingInFileNames": true,
+
+    /* IMPORTANT: avoid ESM/CJS import conflict */
+    "verbatimModuleSyntax": false,
+    "moduleDetection": "auto",
+    "noUncheckedSideEffectImports": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

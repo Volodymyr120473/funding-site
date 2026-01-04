@@ -1,0 +1,54 @@
+/* ===== Page header ===== */
+.funding-title {
+  margin: 0 0 12px 0;
+  padding-bottom: 6px;
+  font-size: 20px;
+  font-weight: 600;
+  color: #111;
+  border-bottom: 2px solid #e5e7eb;
+}
+
+/* ===== Table ===== */
+.funding-table-wrapper {
+  overflow-x: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+}
+
+.funding-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+/* Header */
+.funding-table thead {
+  background: #f9fafb; /* 🔥 замість #eee */
+}
+
+.funding-table th {
+  padding: 8px;
+  text-align: left;
+  font-weight: 600;
+  color: #374151;
+  border-bottom: 1px solid #e5e7eb;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+/* Body */
+.funding-table td {
+  padding: 8px;
+  border-bottom: 1px solid #f1f5f9;
+  white-space: nowrap;
+}
+
+/* Hover row */
+.funding-table tbody tr:hover {
+  background: #07413c;
+}
+
+.funding-table tbody tr:hover {
+  font-weight: 600; /* semibold */
+}
