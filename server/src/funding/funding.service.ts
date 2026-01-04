@@ -18,6 +18,43 @@ const COINGECKO_REST = process.env.COINGECKO_REST || "https://api.coingecko.com/
 const REQ_TIMEOUT = Number(process.env.HTTP_TIMEOUT ?? "15") * 1000;
 const USER_AGENT = process.env.USER_AGENT || "neg-funding-tracker-ts/1.0";
 
+// CoinGecko: щоб менше 429 на Render
+const CG_TTL_MS = Number(process.env.CG_TTL_MS ?? "600000"); // 10 хв
+const CG_PAGES = Number(process.env.CG_PAGES ?? "3"); // 3 сторінки * 250 = топ 750
+const CG_PER_PAGE = Number(process.env.CG_PER_PAGE ?? "250");
+const CG_RETRIES = Number(process.env.CG_RETRIES ?? "3");
+const CG_BACKOFF_MS = Number(process.env.CG_BACKOFF_MS ?? "1200");
+
+// Якщо CG недоступний: дозволити показувати монети без market cap (інакше буде майже пусто)
+const ALLOW_NO_MARKETCAP = String(process.env.ALLOW_NO_MARKETCAP ?? "1").toLowerCase() === "1";
+
+// Опційно: якщо у тебе є ключ CG Pro, можна підставити (зменшить ліміти)
+// CoinGecko Pro підтримує x-cg-pro-api-key. :contentReference[oaicite:0]{index=0}
+const COINGECKO_PRO_API_KEY = process.env.COINGECKO_PRO_API_KEY || "";
+
+// ----------------------------
+// helpers
+// ----------------------------
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function isHttpStatus(err: any, code: number): boolean {
+  const s = err?.response?.status;
+  return s === code;
+}
+
+function errStatus(err: any): number | null {
+  const s = err?.response?.status;
+  return Number.isFinite(s) ? s : null;
+}
+
+function coingeckoHeaders(): Record<string, string> {
+  const h: Record<string, string> = { "User-Agent": USER_AGENT };
+  if (COINGECKO_PRO_API_KEY) h["x-cg-pro-api-key"] = COINGECKO_PRO_API_KEY; // :contentReference[oaicite:1]{index=1}
+  return h;
+}
+
 // ----------------------------
 // Bybit
 // ----------------------------
@@ -101,76 +138,91 @@ async function bybitGetAllLinearTickers(): Promise<any[]> {
 }
 
 // ----------------------------
-// CoinGecko cache with "stale fallback"
+// CoinGecko cache
 // ----------------------------
 type CacheEntry<T> = { exp: number; value: T };
 const cgCache = new Map<string, CacheEntry<any>>();
 
-function cgGetFresh<T>(key: string): T | null {
+function cgGet<T>(key: string): T | null {
   const e = cgCache.get(key);
   if (!e) return null;
-  if (Date.now() > e.exp) return null;
+  if (Date.now() > e.exp) {
+    cgCache.delete(key);
+    return null;
+  }
   return e.value as T;
 }
-
-function cgGetAny<T>(key: string): T | null {
-  const e = cgCache.get(key);
-  return e ? (e.value as T) : null;
-}
-
 function cgSet<T>(key: string, value: T, ttlMs: number) {
   cgCache.set(key, { exp: Date.now() + ttlMs, value });
 }
 
-async function coingeckoBuildSymbolIndex(pages = 1, perPage = 250) {
+async function coingeckoBuildSymbolIndex(pages = CG_PAGES, perPage = CG_PER_PAGE) {
   const cacheKey = `cg:symbolIndex:${pages}:${perPage}`;
-
-  // 1) fresh cache first
-  const fresh = cgGetFresh<Map<string, { name: string; marketCap: number }>>(cacheKey);
-  if (fresh) return fresh;
+  const cached = cgGet<Map<string, { name: string; marketCap: number }>>(cacheKey);
+  if (cached) return cached;
 
   const idx = new Map<string, { name: string; marketCap: number }>();
 
-  try {
-    for (let page = 1; page <= pages; page++) {
-      const params = {
-        vs_currency: "usd",
-        order: "market_cap_desc",
-        per_page: perPage,
-        page,
-        sparkline: "false",
-      };
+  for (let page = 1; page <= pages; page++) {
+    const params = {
+      vs_currency: "usd",
+      order: "market_cap_desc",
+      per_page: perPage,
+      page,
+      sparkline: "false",
+    };
 
-      const data = await httpGet<any[]>(
-        `${COINGECKO_REST}/coins/markets`,
-        params,
-        { "User-Agent": USER_AGENT },
-        REQ_TIMEOUT
-      );
+    // retry/backoff на 429
+    let ok = false;
+    let lastErr: any = null;
 
-      if (!Array.isArray(data)) continue;
+    for (let attempt = 0; attempt <= CG_RETRIES; attempt++) {
+      try {
+        const data = await httpGet<any[]>(
+          `${COINGECKO_REST}/coins/markets`,
+          params,
+          coingeckoHeaders(),
+          REQ_TIMEOUT
+        );
 
-      for (const c of data) {
-        const sym = String(c?.symbol ?? "").toUpperCase().trim();
-        const name = String(c?.name ?? "").trim();
-        const mc = Number(c?.market_cap);
+        if (Array.isArray(data)) {
+          for (const c of data) {
+            const sym = String(c?.symbol ?? "").toUpperCase().trim();
+            const name = String(c?.name ?? "").trim();
+            const mc = Number(c?.market_cap);
 
-        if (!sym || !name || !Number.isFinite(mc)) continue;
-        if (!idx.has(sym)) idx.set(sym, { name, marketCap: Math.trunc(mc) });
+            if (!sym || !name || !Number.isFinite(mc)) continue;
+            if (!idx.has(sym)) idx.set(sym, { name, marketCap: Math.trunc(mc) });
+          }
+        }
+
+        ok = true;
+        break;
+      } catch (e: any) {
+        lastErr = e;
+
+        // 429 -> backoff і повтор
+        if (isHttpStatus(e, 429) && attempt < CG_RETRIES) {
+          await sleep(CG_BACKOFF_MS * (attempt + 1));
+          continue;
+        }
+
+        // 403/інші -> виходимо
+        break;
       }
     }
 
-    // TTL 30 min
-    cgSet(cacheKey, idx, 30 * 60_000);
-    return idx;
-  } catch (e: any) {
-    // 2) If CG rate-limited / unavailable - return any cached value (even stale)
-    const any = cgGetAny<Map<string, { name: string; marketCap: number }>>(cacheKey);
-    if (any) return any;
-
-    // 3) No cache yet -> empty map (do not crash the whole endpoint)
-    return new Map<string, { name: string; marketCap: number }>();
+    if (!ok) {
+      // Якщо CG впав на якійсь сторінці — просто зупиняємось (не валимо весь сервіс)
+      // (індекс буде неповний, але краще ніж 500)
+      // можна залогувати статус:
+      // console.warn("CoinGecko failed page", page, "status", errStatus(lastErr));
+      break;
+    }
   }
+
+  cgSet(cacheKey, idx, CG_TTL_MS);
+  return idx;
 }
 
 // ----------------------------
@@ -231,9 +283,10 @@ async function enrichOpenInterestBybit(rows: FundingRow[], concurrency = 4): Pro
 // Main screener
 // ----------------------------
 export async function getFundingScreener(filters: FundingFilters): Promise<FundingResponse> {
-  // pages=1 to reduce 429 risk on Render
-  const cgIdx = await coingeckoBuildSymbolIndex(1, 250);
   const rows: FundingRow[] = [];
+
+  // 1) CoinGecko index (може впасти/бути неповним — це ок)
+  const cgIdx = await coingeckoBuildSymbolIndex(CG_PAGES, CG_PER_PAGE);
 
   // ----------------------------
   // BINANCE
@@ -260,7 +313,13 @@ export async function getFundingScreener(filters: FundingFilters): Promise<Fundi
       const cg = baseU ? cgIdx.get(baseU) : undefined;
       const marketCap = cg?.marketCap ?? null;
       const name = cg?.name ?? "-";
-      if (marketCap === null || marketCap < filters.minMarketCapUsd) continue;
+
+      // якщо marketcap нема і ALLOW_NO_MARKETCAP=false -> відсікаємо
+      if (marketCap === null) {
+        if (!ALLOW_NO_MARKETCAP) continue;
+      } else if (marketCap < filters.minMarketCapUsd) {
+        continue;
+      }
 
       rows.push({
         symbol: sym,
@@ -284,7 +343,6 @@ export async function getFundingScreener(filters: FundingFilters): Promise<Fundi
     }
 
     sortRowsByDirection(rows, filters);
-
     const limited = rows.slice(0, Math.max(1, filters.limit));
     await enrichOpenInterestBinance(limited);
 
@@ -299,63 +357,81 @@ export async function getFundingScreener(filters: FundingFilters): Promise<Fundi
   // ----------------------------
   // BYBIT
   // ----------------------------
-  const instruments = await bybitGetAllLinearInstruments();
-  const { allowed, symbolToBase } = buildUsdtPerpUniverse(instruments);
-  const tickers = await bybitGetAllLinearTickers();
+  // ВАЖЛИВО: якщо Render-регіон блочиться Bybit (403 CloudFront),
+  // цей блок може падати. Тому обгортаємо в try/catch і повертаємо
+  // нормальну відповідь (можливо порожню), а не 500.
+  try {
+    const instruments = await bybitGetAllLinearInstruments();
+    const { allowed, symbolToBase } = buildUsdtPerpUniverse(instruments);
+    const tickers = await bybitGetAllLinearTickers();
 
-  for (const t of tickers) {
-    const sym = String(t?.symbol ?? "").trim();
-    if (!sym) continue;
-    if (!allowed.has(sym)) continue;
+    for (const t of tickers) {
+      const sym = String(t?.symbol ?? "").trim();
+      if (!sym) continue;
+      if (!allowed.has(sym)) continue;
 
-    const fr = safeFloat(t?.fundingRate);
-    if (fr === null) continue;
-    if (!fundingPassesDirection(fr, filters)) continue;
+      const fr = safeFloat(t?.fundingRate);
+      if (fr === null) continue;
+      if (!fundingPassesDirection(fr, filters)) continue;
 
-    const turnover24h = safeFloat(t?.turnover24h);
-    if (turnover24h === null || turnover24h < filters.minTurnover24hUsd) continue;
+      const turnover24h = safeFloat(t?.turnover24h);
+      if (turnover24h === null || turnover24h < filters.minTurnover24hUsd) continue;
 
-    const base = symbolToBase.get(sym) || "";
-    const baseU = base ? base.toUpperCase() : "";
+      const base = symbolToBase.get(sym) || "";
+      const baseU = base ? base.toUpperCase() : "";
 
-    const cg = baseU ? cgIdx.get(baseU) : undefined;
-    const marketCap = cg?.marketCap ?? null;
-    const name = cg?.name ?? "-";
-    if (marketCap === null || marketCap < filters.minMarketCapUsd) continue;
+      const cg = baseU ? cgIdx.get(baseU) : undefined;
+      const marketCap = cg?.marketCap ?? null;
+      const name = cg?.name ?? "-";
 
-    const markPrice = safeFloat(t?.markPrice);
-    const nextFunding = isoFromMs(t?.nextFundingTime);
+      if (marketCap === null) {
+        if (!ALLOW_NO_MARKETCAP) continue;
+      } else if (marketCap < filters.minMarketCapUsd) {
+        continue;
+      }
 
-    rows.push({
-      symbol: sym,
-      name,
-      ticker: baseU || sym,
-      funding: fr,
+      const markPrice = safeFloat(t?.markPrice);
+      const nextFunding = isoFromMs(t?.nextFundingTime);
 
-      df_8h: null,
-      df_16h: null,
+      rows.push({
+        symbol: sym,
+        name,
+        ticker: baseU || sym,
+        funding: fr,
 
-      open_interest: null,
-      oi_value_usd: null,
-      oi_chg_8h: null,
+        df_8h: null,
+        df_16h: null,
 
-      market_cap: marketCap,
-      next_funding: nextFunding,
-      mark_price: markPrice,
-      turnover_24h: turnover24h,
-      alert: "",
-    });
+        open_interest: null,
+        oi_value_usd: null,
+        oi_chg_8h: null,
+
+        market_cap: marketCap,
+        next_funding: nextFunding,
+        mark_price: markPrice,
+        turnover_24h: turnover24h,
+        alert: "",
+      });
+    }
+
+    sortRowsByDirection(rows, filters);
+    const limited = rows.slice(0, Math.max(1, filters.limit));
+    await enrichOpenInterestBybit(limited, 4);
+
+    return {
+      updatedAtUtc: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      filters,
+      count: limited.length,
+      rows: limited,
+    };
+  } catch (e: any) {
+    const status = errStatus(e);
+    // якщо Bybit/CloudFront блочить — повернемо порожню, але "живу" відповідь
+    return {
+      updatedAtUtc: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      filters,
+      count: 0,
+      rows: [],
+    };
   }
-
-  sortRowsByDirection(rows, filters);
-
-  const limited = rows.slice(0, Math.max(1, filters.limit));
-  await enrichOpenInterestBybit(limited, 4);
-
-  return {
-    updatedAtUtc: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
-    filters,
-    count: limited.length,
-    rows: limited,
-  };
 }

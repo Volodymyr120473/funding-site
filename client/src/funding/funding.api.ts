@@ -7,7 +7,9 @@ export async function fetchFundingScreener(
 
   Object.entries(filters).forEach(([k, v]) => {
     if (v === undefined || v === null) return;
-    params.set(k, String(v));
+    const s = String(v).trim();
+    if (!s) return;
+    params.set(k, s);
   });
 
 
