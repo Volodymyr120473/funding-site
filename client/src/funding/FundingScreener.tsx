@@ -324,7 +324,7 @@ export default function FundingScreener() {
 
     return (
         <div style={{ padding: 16, fontFamily: "Arial, sans-serif" }} onKeyDown={onKeyDown}>
-            <h2 className="funding-title">Funding Screener</h2>
+            <h2 className="funding-title">Funding Screener 2</h2>
 
 
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
