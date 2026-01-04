@@ -101,62 +101,76 @@ async function bybitGetAllLinearTickers(): Promise<any[]> {
 }
 
 // ----------------------------
-// CoinGecko кеш (щоб не ловити 429 на CG)
+// CoinGecko cache with "stale fallback"
 // ----------------------------
 type CacheEntry<T> = { exp: number; value: T };
 const cgCache = new Map<string, CacheEntry<any>>();
 
-function cgGet<T>(key: string): T | null {
+function cgGetFresh<T>(key: string): T | null {
   const e = cgCache.get(key);
   if (!e) return null;
-  if (Date.now() > e.exp) {
-    cgCache.delete(key);
-    return null;
-  }
+  if (Date.now() > e.exp) return null;
   return e.value as T;
 }
+
+function cgGetAny<T>(key: string): T | null {
+  const e = cgCache.get(key);
+  return e ? (e.value as T) : null;
+}
+
 function cgSet<T>(key: string, value: T, ttlMs: number) {
   cgCache.set(key, { exp: Date.now() + ttlMs, value });
 }
 
-async function coingeckoBuildSymbolIndex(pages = 3, perPage = 250) {
+async function coingeckoBuildSymbolIndex(pages = 1, perPage = 250) {
   const cacheKey = `cg:symbolIndex:${pages}:${perPage}`;
-  const cached = cgGet<Map<string, { name: string; marketCap: number }>>(cacheKey);
-  if (cached) return cached;
+
+  // 1) fresh cache first
+  const fresh = cgGetFresh<Map<string, { name: string; marketCap: number }>>(cacheKey);
+  if (fresh) return fresh;
 
   const idx = new Map<string, { name: string; marketCap: number }>();
 
-  for (let page = 1; page <= pages; page++) {
-    const params = {
-      vs_currency: "usd",
-      order: "market_cap_desc",
-      per_page: perPage,
-      page,
-      sparkline: "false",
-    };
+  try {
+    for (let page = 1; page <= pages; page++) {
+      const params = {
+        vs_currency: "usd",
+        order: "market_cap_desc",
+        per_page: perPage,
+        page,
+        sparkline: "false",
+      };
 
-    const data = await httpGet<any[]>(
-      `${COINGECKO_REST}/coins/markets`,
-      params,
-      { "User-Agent": USER_AGENT },
-      REQ_TIMEOUT
-    );
+      const data = await httpGet<any[]>(
+        `${COINGECKO_REST}/coins/markets`,
+        params,
+        { "User-Agent": USER_AGENT },
+        REQ_TIMEOUT
+      );
 
-    if (!Array.isArray(data)) continue;
+      if (!Array.isArray(data)) continue;
 
-    for (const c of data) {
-      const sym = String(c?.symbol ?? "").toUpperCase().trim();
-      const name = String(c?.name ?? "").trim();
-      const mc = Number(c?.market_cap);
+      for (const c of data) {
+        const sym = String(c?.symbol ?? "").toUpperCase().trim();
+        const name = String(c?.name ?? "").trim();
+        const mc = Number(c?.market_cap);
 
-      if (!sym || !name || !Number.isFinite(mc)) continue;
-      if (!idx.has(sym)) idx.set(sym, { name, marketCap: Math.trunc(mc) });
+        if (!sym || !name || !Number.isFinite(mc)) continue;
+        if (!idx.has(sym)) idx.set(sym, { name, marketCap: Math.trunc(mc) });
+      }
     }
-  }
 
-  // кеш 2 хв
-  cgSet(cacheKey, idx, 120_000);
-  return idx;
+    // TTL 30 min
+    cgSet(cacheKey, idx, 30 * 60_000);
+    return idx;
+  } catch (e: any) {
+    // 2) If CG rate-limited / unavailable - return any cached value (even stale)
+    const any = cgGetAny<Map<string, { name: string; marketCap: number }>>(cacheKey);
+    if (any) return any;
+
+    // 3) No cache yet -> empty map (do not crash the whole endpoint)
+    return new Map<string, { name: string; marketCap: number }>();
+  }
 }
 
 // ----------------------------
@@ -177,7 +191,6 @@ function sortRowsByDirection(rows: FundingRow[], filters: FundingFilters) {
 }
 
 async function enrichOpenInterestBinance(rows: FundingRow[]): Promise<void> {
-  // Тут concurrency не потрібен — adapter вже тротлить.
   for (const r of rows) {
     const oi = await binanceGetOpenInterest(r.symbol);
     r.open_interest = oi;
@@ -218,7 +231,8 @@ async function enrichOpenInterestBybit(rows: FundingRow[], concurrency = 4): Pro
 // Main screener
 // ----------------------------
 export async function getFundingScreener(filters: FundingFilters): Promise<FundingResponse> {
-  const cgIdx = await coingeckoBuildSymbolIndex(3, 250);
+  // pages=1 to reduce 429 risk on Render
+  const cgIdx = await coingeckoBuildSymbolIndex(1, 250);
   const rows: FundingRow[] = [];
 
   // ----------------------------
@@ -271,7 +285,6 @@ export async function getFundingScreener(filters: FundingFilters): Promise<Fundi
 
     sortRowsByDirection(rows, filters);
 
-    // ✅ рівно LIMIT, і тільки для них тягнемо OI
     const limited = rows.slice(0, Math.max(1, filters.limit));
     await enrichOpenInterestBinance(limited);
 
@@ -336,7 +349,6 @@ export async function getFundingScreener(filters: FundingFilters): Promise<Fundi
 
   sortRowsByDirection(rows, filters);
 
-  // ✅ як і для Binance: тягнемо OI тільки для LIMIT
   const limited = rows.slice(0, Math.max(1, filters.limit));
   await enrichOpenInterestBybit(limited, 4);
 

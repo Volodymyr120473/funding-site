@@ -89,8 +89,16 @@ export async function getFundingScreenerHandler(req: Request, res: Response) {
     const data = await getFundingScreener(filters);
     res.json(data);
   } catch (e: any) {
-    res.status(500).json({ error: String(e?.message ?? e) });
+    const status = Number(e?.response?.status || 500);
+    const msg =
+      e?.response?.data?.error ||
+      e?.response?.data ||
+      e?.message ||
+      String(e);
+
+    res.status(status).json({ error: String(msg) });
   }
+
 }
 
 /**
@@ -126,8 +134,15 @@ export async function getNegativeFundingHandler(req: Request, res: Response) {
     const data = await getFundingScreener(filters);
     res.json(data);
   } catch (e: any) {
-    console.error("[funding/screener] error:", e?.response?.status, e?.response?.data ?? e);
-    res.status(500).json({ error: String(e?.message ?? e) });
+    const status = Number(e?.response?.status || 500);
+    const msg =
+      e?.response?.data?.error ||
+      e?.response?.data ||
+      e?.message ||
+      String(e);
+
+    res.status(status).json({ error: String(msg) });
   }
+
 
 }
