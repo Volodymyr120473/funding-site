@@ -126,6 +126,8 @@ export async function getNegativeFundingHandler(req: Request, res: Response) {
     const data = await getFundingScreener(filters);
     res.json(data);
   } catch (e: any) {
+    console.error("[funding/screener] error:", e?.response?.status, e?.response?.data ?? e);
     res.status(500).json({ error: String(e?.message ?? e) });
   }
+
 }
