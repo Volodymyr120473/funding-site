@@ -140,7 +140,6 @@ export async function getNegativeFundingHandler(req: Request, res: Response) {
       e?.response?.data ||
       e?.message ||
       String(e);
-
     res.status(status).json({ error: String(msg) });
   }
 
