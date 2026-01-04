@@ -6,10 +6,10 @@ export async function fetchFundingScreener(
   const params = new URLSearchParams();
 
   Object.entries(filters).forEach(([k, v]) => {
-    if (v !== undefined && v !== null && v !== "") {
-      params.set(k, String(v));
-    }
+    if (v === undefined || v === null) return;
+    params.set(k, String(v));
   });
+
 
   const url = `/funding/screener?${params.toString()}`;
   const res = await fetch(url);
